@@ -6469,8 +6469,8 @@ queue_go_source('internal/api/handlers/management/quota_recovery.go')
 auth_selector = ROOT / 'sdk/cliproxy/auth/selector.go'
 replace_once(
     auth_selector,
-    '\tif hasUnauthorizedAuthFailure(auth) {\n',
-    '\tif blocked, retryAt := proQuotaProtectionBlocked(auth, model, now); blocked {\n\t\treturn true, blockReasonCooldown, retryAt\n\t}\n\tif hasUnauthorizedAuthFailure(auth) {\n',
+    '\tif hasUnauthorizedAuthFailure(auth) {\n\t\treturn true, blockReasonOther, time.Time{}\n\t}\n',
+    '\tif blocked, retryAt := proQuotaProtectionBlocked(auth, model, now); blocked {\n\t\treturn true, blockReasonCooldown, retryAt\n\t}\n\tif hasUnauthorizedAuthFailure(auth) {\n\t\treturn true, blockReasonOther, time.Time{}\n\t}\n',
     'proQuotaProtectionBlocked(auth, model, now)',
 )
 
