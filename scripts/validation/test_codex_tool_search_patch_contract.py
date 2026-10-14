@@ -23,10 +23,10 @@ class CodexToolSearchPatchContract(unittest.TestCase):
 \t\t\t\treturn h.SupportsNativeToolSearchModel(effectiveModelID(id))
 \t\t\t}
 \t\t}''', replacement)
-        self.assertIn('BuildResponseForClientWithToolCapabilities(allModels, providersForModel, webSearchCapabilityForModel, applyPatchCapabilityForModel, toolSearchCapabilityForModel, h.Cfg != nil && h.Cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion)', replacement)
+        self.assertIn('BuildResponseForClientWithToolCapabilities(allModels, providersForModel, webSearchCapabilityForModel, applyPatchCapabilityForModel, toolSearchCapabilityForModel, cfg != nil && cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion)', replacement)
         self.assertIn('effectiveIDs[model.ID] = model.EffectiveID', replacement)
         self.assertIn('handlers.FilterModelsForRequest(c.Request.Context(), catalogIDs, modelRegistry.GetModelProviders)', replacement)
-        self.assertIn('h.Cfg != nil && h.Cfg.Client.Codex.EnableApplyPatch', replacement)
+        self.assertIn('cfg != nil && cfg.Client.Codex.EnableApplyPatch', replacement)
 
 
 if __name__ == '__main__':

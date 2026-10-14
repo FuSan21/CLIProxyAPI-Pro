@@ -800,12 +800,14 @@ replace_once(
 )
 replace_once(
     proxy_helpers,
-    '''func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+    '''func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	// A request proxy replaces both the injected round tripper and credential/global proxy.
 	// Respect explicitly injected context RoundTripper only when no request override is set.
 	if cliproxyexecutor.RequestProxyURL(ctx) == "" && ctx != nil {
 ''',
-    '''func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+    '''func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	generation := proxyutil.ResolveEffectiveProxy("").Generation
 	syncDevinRuntimeProxyGeneration(generation)
 	if cliproxyexecutor.RequestProxyURL(ctx) == "" && ctx != nil {
@@ -1059,11 +1061,13 @@ replace_once(
 )
 replace_once(
     utls_client,
-    '''func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+    '''func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 ''',
-    '''func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+    '''func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	rawProxyURL := effectiveProxyURL(ctx, cfg, auth)
 	resolution := proxyutil.ResolveEffectiveProxy(rawProxyURL)
 
@@ -1261,7 +1265,7 @@ replace_once(
 		// context transport fallback, preserving the previous behavior.
 	}
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
@@ -1287,10 +1291,12 @@ replace_once(
 )
 replace_once(
     antigravity_executor,
-    '''func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+    '''func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	// Native Antigravity reuses one transport across requests. Opt into a
 ''',
-    '''func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+    '''func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	// Resolve once so the transport route and its cache generation always come
 	// from the same runtime-override snapshot.
 	resolution := proxyutil.ResolveEffectiveProxy(antigravityProxyURL(ctx, cfg, auth))
@@ -1527,24 +1533,24 @@ replace_once(
     '''\tif ctx.Err() != nil {
 \t\treturn
 \t}
-\tmodels = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
+\tmodels = applyOAuthModelAliasForAuth(cfg, provider, authKind, a.Attributes, models)
 ''',
     '''\tif ctx.Err() != nil {
 \t\treturn
 \t}
-\tmodels = s.applyOAuthPolicy(ctx, a, models)
-\tmodels = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
+\tmodels = s.applyOAuthPolicy(ctx, cfg, a, models)
+\tmodels = applyOAuthModelAliasForAuth(cfg, provider, authKind, a.Attributes, models)
 ''',
-    'models = s.applyOAuthPolicy(ctx, a, models)',
+    'models = s.applyOAuthPolicy(ctx, cfg, a, models)',
 )
 insert_before(
     service_models,
     'func (s *Service) oauthExcludedModels(provider, authKind string) []string {\n',
-    '''func (s *Service) applyOAuthPolicy(ctx context.Context, auth *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
+    '''func (s *Service) applyOAuthPolicy(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
 \tif s == nil || s.proApp == nil || auth == nil || len(models) == 0 {
 \t\treturn models
 \t}
-\treturn s.proApp.FilterModels(ctx, s.cfg, auth, models, s.coreManager)
+\treturn s.proApp.FilterModels(ctx, cfg, auth, models, s.coreManager)
 }
 
 ''',
@@ -1607,19 +1613,19 @@ func (s *Service) registerResolvedModelsForCurrentAuth(a *coreauth.Auth, provide
 replace_once(
     service_executors,
     '''\tmodels := applyExcludedModels(result.Models, activeExcluded)
-\tmodels = applyOAuthModelAliasForAuth(s.cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
+\tmodels = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 ''',
     '''\tmodels := applyExcludedModels(result.Models, activeExcluded)
-\tmodels = s.applyOAuthPolicy(ctx, activeAuth, models)
-\tmodels = applyOAuthModelAliasForAuth(s.cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
+\tmodels = s.applyOAuthPolicy(ctx, cfg, activeAuth, models)
+\tmodels = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 ''',
-    'models = s.applyOAuthPolicy(ctx, activeAuth, models)',
+    'models = s.applyOAuthPolicy(ctx, cfg, activeAuth, models)',
 )
 
 replace_once(
     service_executors,
-    's.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))',
-    's.registerResolvedModelsForAuth(ctx, activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))',
+    's.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))',
+    's.registerResolvedModelsForAuth(ctx, activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))',
     's.registerResolvedModelsForAuth(ctx, activeAuth, providerKey',
 )
 
@@ -2017,17 +2023,17 @@ replace_once(
 replace_once(
     management_handler_source,
     '''\th.mu.Lock()
-\th.cfg = cfg
+\th.cfg = cloned
 \th.mu.Unlock()
 ''',
     '''\th.mu.Lock()
 \th.updateAPIKeyConfigGenerationLocked()
-\th.cfg = cfg
+\th.cfg = cloned
 \th.updateAPIKeyConfigGenerationLocked()
 \tapplication := h.proApp
 \tvar apiKeys []string
-\tif cfg != nil {
-\t\tapiKeys = append(apiKeys, cfg.APIKeys...)
+\tif cloned != nil {
+\t\tapiKeys = append(apiKeys, cloned.APIKeys...)
 \t}
 \th.mu.Unlock()
 \tif application != nil && application.APIKeyPolicy() != nil {
@@ -3534,7 +3540,8 @@ replace_once(
 replace_once(
     openai_handlers_source,
     '\t\tbody, errMarshal := codexmodels.MarshalCompact(h.codexClientModelsResponse(clientVersion))\n',
-    '''\t\tmodelRegistry := registry.GetGlobalRegistry()
+    '''\t\tcfg := h.CurrentConfig()
+\t\tmodelRegistry := registry.GetGlobalRegistry()
 \t\tcatalogIDs := make([]string, 0, len(catalogModels))
 \t\tfor _, model := range catalogModels {
 \t\t\tif id, ok := model["id"].(string); ok && id != "" {
@@ -3563,7 +3570,7 @@ replace_once(
 \t\t\treturn modelRegistry.GetResponsesWebSearchCapability(effectiveModelID(id))
 \t\t}
 \t\tvar applyPatchCapabilityForModel codexmodels.ApplyPatchCapabilityForModelFunc
-\t\tif h.Cfg != nil && h.Cfg.Client.Codex.EnableApplyPatch {
+\t\tif cfg != nil && cfg.Client.Codex.EnableApplyPatch {
 \t\t\tapplyPatchCapabilityForModel = func(id string) bool {
 \t\t\t\treturn h.SupportsApplyPatchModel(effectiveModelID(id))
 \t\t\t}
@@ -3574,7 +3581,7 @@ replace_once(
 \t\t\t\treturn h.SupportsNativeToolSearchModel(effectiveModelID(id))
 \t\t\t}
 \t\t}
-\t\tbody, errMarshal := codexmodels.MarshalCompact(codexmodels.BuildResponseForClientWithToolCapabilities(allModels, providersForModel, webSearchCapabilityForModel, applyPatchCapabilityForModel, toolSearchCapabilityForModel, h.Cfg != nil && h.Cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion))
+\t\tbody, errMarshal := codexmodels.MarshalCompact(codexmodels.BuildResponseForClientWithToolCapabilities(allModels, providersForModel, webSearchCapabilityForModel, applyPatchCapabilityForModel, toolSearchCapabilityForModel, cfg != nil && cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion))
 ''',
 )
 replace_once(
@@ -3611,7 +3618,8 @@ replace_once(
 replace_once(
     claude_handlers_source,
     '''func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-\tdisableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
+\tcfg := h.CurrentConfig()
+\tdisableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
 \th.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(h.Models(), disableCloaking))
 }
 ''',
@@ -3625,7 +3633,8 @@ replace_once(
 \t\th.WriteErrorResponse(c, policyErr)
 \t\treturn
 \t}
-\tdisableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
+\tcfg := h.CurrentConfig()
+\tdisableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
 \th.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(models, disableCloaking))
 }
 ''',
