@@ -243,3 +243,60 @@ func TestStalePluginAuthUpdateCannotReplaceRecreatedAuth(t *testing.T) {
 		t.Fatalf("recreated auth was overwritten by stale plugin update: %#v", current)
 	}
 }
+
+func TestCurrentRegistrationTokenCannotUpdateSupersededAuthInputs(t *testing.T) {
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{coreManager: manager}
+	auth, err := manager.Register(ctx, &coreauth.Auth{ID: "current-token-stale-inputs", Provider: "claude", Prefix: "old", Status: coreauth.StatusActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrationCtx := service.beginAuthModelRegistration(ctx, auth.ID)
+	current := auth.Clone()
+	current.Prefix = "new"
+	if _, err = manager.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	staleUpdate := auth.Clone()
+	staleUpdate.Label = "stale-plugin-update"
+	if _, committed := service.updateAuthForCurrentModelRegistration(registrationCtx, auth, staleUpdate); committed {
+		t.Fatal("current queue token allowed a plugin update from superseded registration inputs")
+	}
+	current, found := manager.GetByID(auth.ID)
+	if !found || current.Prefix != "new" || current.Label == "stale-plugin-update" {
+		t.Fatalf("superseded plugin update replaced current auth: %#v", current)
+	}
+}
+
+func TestCurrentRegistrationTokenPreservesPublicationFence(t *testing.T) {
+	for _, unregister := range []bool{false, true} {
+		name := "publish"
+		if unregister {
+			name = "unregister"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			manager := coreauth.NewManager(nil, nil, nil)
+			service := &Service{coreManager: manager}
+			auth, err := manager.Register(ctx, &coreauth.Auth{ID: "current-token-stale-epoch-" + name, Provider: "claude", Status: coreauth.StatusActive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			modelRegistry := GlobalModelRegistry()
+			t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+			registrationCtx := service.beginAuthModelRegistration(ctx, auth.ID)
+			fence := newModelRegistrationFence(auth)
+			modelRegistry.RegisterClient(auth.ID, "claude", []*ModelInfo{{ID: "newer-model"}})
+			if unregister {
+				service.unregisterModelsForCurrentAuth(registrationCtx, auth, fence)
+			} else {
+				service.registerResolvedModelsForCurrentAuth(registrationCtx, auth, fence, "claude", []*ModelInfo{{ID: "stale-model"}})
+			}
+			models := modelRegistry.GetModelsForClient(auth.ID)
+			if len(models) != 1 || models[0].ID != "newer-model" {
+				t.Fatalf("current queue token bypassed the original publication fence: %#v", models)
+			}
+		})
+	}
+}

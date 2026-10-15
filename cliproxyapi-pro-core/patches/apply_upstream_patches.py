@@ -1034,10 +1034,8 @@ replace_once(
 replace_once(
     utls_client,
     '''func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
-	// The cache is scoped to this round tripper, which is already keyed by proxy,
 ''',
     '''func newClaudeCodeRoundTripperResolved(effectiveProxyURL string) http.RoundTripper {
-	// The cache is scoped to this round tripper, which is already keyed by proxy,
 ''',
 )
 replace_once(
@@ -1061,14 +1059,10 @@ replace_once(
 )
 replace_once(
     utls_client,
-    '''func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
-	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
-	proxyURL := effectiveProxyURL(ctx, cfg, auth)
+    '''	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 ''',
-    '''func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
-	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
-	rawProxyURL := effectiveProxyURL(ctx, cfg, auth)
+    '''	rawProxyURL := effectiveProxyURL(ctx, cfg, auth)
 	resolution := proxyutil.ResolveEffectiveProxy(rawProxyURL)
 
 ''',
@@ -1588,25 +1582,17 @@ replace_once(
 )
 
 service_executors = ROOT / 'sdk/cliproxy/service_executors.go'
-replace_once(
+# Keep the upstream identity/registry-epoch fence inside the Pro queue-token
+# gate. Neither layer may adopt a newer publication while an old task finishes.
+insert_before(
     service_executors,
-    '''func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey string, models []*ModelInfo) {
-\tif a == nil || a.ID == "" {
-\t\treturn
-\t}
-''',
-    '''func (s *Service) registerResolvedModelsForAuth(ctx context.Context, a *coreauth.Auth, providerKey string, models []*ModelInfo) {
-\tif a == nil || a.ID == "" {
-\t\treturn
-\t}
-\tif !s.withCurrentAuthModelCommit(ctx, a, func() {
-\t\ts.registerResolvedModelsForCurrentAuth(a, providerKey, models)
-\t}) {
-\t\treturn
-\t}
+    'func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey string, models []*ModelInfo) {\n',
+    '''func (s *Service) registerResolvedModelsForCurrentAuth(ctx context.Context, a *coreauth.Auth, fence modelRegistrationFence, providerKey string, models []*ModelInfo) {
+\t_ = s.withCurrentAuthModelCommit(ctx, a, func() {
+\t\ts.registerResolvedModelsForAuthFenced(a, fence, providerKey, models)
+\t})
 }
 
-func (s *Service) registerResolvedModelsForCurrentAuth(a *coreauth.Auth, providerKey string, models []*ModelInfo) {
 ''',
     'func (s *Service) registerResolvedModelsForCurrentAuth',
 )
@@ -1624,9 +1610,9 @@ replace_once(
 
 replace_once(
     service_executors,
-    's.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))',
-    's.registerResolvedModelsForAuth(ctx, activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))',
-    's.registerResolvedModelsForAuth(ctx, activeAuth, providerKey',
+    's.registerResolvedModelsForAuthFenced(activeAuth, publicationFence, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))',
+    's.registerResolvedModelsForCurrentAuth(ctx, activeAuth, publicationFence, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))',
+    's.registerResolvedModelsForCurrentAuth(ctx, activeAuth, publicationFence, providerKey',
 )
 
 replace_once(
@@ -1722,18 +1708,19 @@ func (s *Service) updateAuthForCurrentModelRegistration(ctx context.Context, aut
 \t\treturn nil, false
 \t}
 \tvar result *coreauth.Auth
+\tvar committed bool
 \tvar errUpdate error
 \tif !s.withCurrentAuthModelCommit(ctx, auth, func() {
-\t\tresult, errUpdate = s.coreManager.Update(ctx, updated)
-\t}) || errUpdate != nil || result == nil {
+\t\tresult, committed, errUpdate = s.coreManager.UpdateIfRegistrationCurrent(ctx, auth, updated)
+\t}) || errUpdate != nil || !committed || result == nil {
 \t\treturn nil, false
 \t}
 \treturn result, true
 }
 
-func (s *Service) unregisterModelsForCurrentAuth(ctx context.Context, auth *coreauth.Auth) {
+func (s *Service) unregisterModelsForCurrentAuth(ctx context.Context, auth *coreauth.Auth, fence modelRegistrationFence) {
 \t_ = s.withCurrentAuthModelCommit(ctx, auth, func() {
-\t\tGlobalModelRegistry().UnregisterClient(auth.ID)
+\t\ts.unregisterModelsForAuthFenced(auth, fence)
 \t})
 }
 
@@ -1743,26 +1730,20 @@ func (s *Service) unregisterModelsForCurrentAuth(ctx context.Context, auth *core
 
 replace_once(
     service_models,
-    '''\tif ctx.Err() != nil {
-\t\treturn
-\t}
+    '''\tfence := newModelRegistrationFence(a)
 \ts.cancelStaleAntigravityProbes(a.ID)
-\tif a.Disabled {
 ''',
-    '''\tif ctx.Err() != nil {
-\t\treturn
-\t}
-\tctx = s.beginAuthModelRegistration(ctx, a.ID)
+    '''\tctx = s.beginAuthModelRegistration(ctx, a.ID)
 \tif !s.isCurrentAuthModelRegistration(ctx, a) {
 \t\treturn
 \t}
+\tfence := newModelRegistrationFence(a)
 \ts.cancelStaleAntigravityProbes(a.ID)
-\tif a.Disabled {
 ''',
     'ctx = s.beginAuthModelRegistration(ctx, a.ID)',
 )
 service_models_text = read(service_models)
-unregister_model_call = '\tGlobalModelRegistry().UnregisterClient(a.ID)'
+unregister_model_call = '\ts.unregisterModelsForAuthFenced(a, fence)'
 if service_models_text.count(unregister_model_call) != 5:
     raise SystemExit(
         f'expected five auth model unregister calls in {service_models}, '
@@ -1772,29 +1753,25 @@ write(
     service_models,
     service_models_text.replace(
         unregister_model_call,
-        '\ts.unregisterModelsForCurrentAuth(ctx, a)',
+        '\ts.unregisterModelsForCurrentAuth(ctx, a, fence)',
     ).replace(
-        's.registerResolvedModelsForAuth(a,',
-        's.registerResolvedModelsForAuth(ctx, a,',
+        's.registerResolvedModelsForAuthFenced(a, fence,',
+        's.registerResolvedModelsForCurrentAuth(ctx, a, fence,',
     ),
 )
 
 replace_once(
     service_executors,
-    '\tGlobalModelRegistry().UnregisterClient(activeAuth.ID)\n\treturn true\n',
-    '\ts.unregisterModelsForCurrentAuth(ctx, activeAuth)\n\treturn true\n',
-    's.unregisterModelsForCurrentAuth(ctx, activeAuth)',
+    '\ts.unregisterModelsForAuthFenced(activeAuth, publicationFence)\n\treturn true\n',
+    '\ts.unregisterModelsForCurrentAuth(ctx, activeAuth, publicationFence)\n\treturn true\n',
+    's.unregisterModelsForCurrentAuth(ctx, activeAuth, publicationFence)',
 )
 
 replace_once(
     service_executors,
-    '''\t\tif updated, errUpdate := s.coreManager.Update(ctx, result.Auth); errUpdate == nil && updated != nil {
-\t\t\tactiveAuth = updated.Clone()
-\t\t}
+    '''\t\tif updated, committed, errUpdate := s.coreManager.UpdateIfRegistrationCurrent(ctx, a, result.Auth); errUpdate == nil && committed && updated != nil {
 ''',
     '''\t\tif updated, committed := s.updateAuthForCurrentModelRegistration(ctx, a, result.Auth); committed {
-\t\t\tactiveAuth = updated.Clone()
-\t\t}
 ''',
     's.updateAuthForCurrentModelRegistration(ctx, a, result.Auth)',
 )
@@ -6555,7 +6532,7 @@ replace_once(
     '\tif mode == updateModeRefresh {\n\t\tmerged := MergeRefreshedAuth(base, existing, auth)\n',
     '''\tif mode == updateModeInspectionRefresh && !inspectionRefreshIdentityMatches(base, existing) {
 \t\tm.mu.Unlock()
-\t\treturn nil, ErrInspectionAuthChanged
+\t\treturn nil, false, false, ErrInspectionAuthChanged
 \t}
 \tif mode == updateModeRefresh || mode == updateModeInspectionRefresh {
 \t\tmerged := MergeRefreshedAuth(base, existing, auth)
@@ -6645,9 +6622,9 @@ lifecycle_scheduler_upsert = '''\t// Snapshot before unlocking: MarkResult mutat
 \t\tm.scheduler.upsertAuth(schedulerSnapshot)
 \t}
 '''
-if auth_conductor_text.count(lifecycle_scheduler_upsert) != 2:
+if auth_conductor_text.count(lifecycle_scheduler_upsert) != 1:
     raise SystemExit(
-        f'expected two lifecycle scheduler upserts in {auth_conductor}, '
+        f'expected one registration scheduler upsert in {auth_conductor}, '
         f'found {auth_conductor_text.count(lifecycle_scheduler_upsert)}'
     )
 write(
@@ -6662,6 +6639,17 @@ write(
 \tm.RefreshSchedulerEntry(authClone.ID)
 ''',
     ),
+)
+# Updates now share a post-commit helper, called after releasing the auth
+# mutation gate (including conditional plugin updates). Keep that ordering.
+replace_once(
+    auth_conductor,
+    '''\tif m.scheduler != nil {
+\t\tm.scheduler.upsertAuth(committed.Clone())
+\t}
+''',
+    '''\tm.RefreshSchedulerEntry(committed.ID)
+''',
 )
 
 auth_conductor = ROOT / 'sdk/cliproxy/auth/conductor_cooldown.go'

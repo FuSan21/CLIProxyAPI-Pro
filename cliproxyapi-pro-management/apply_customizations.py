@@ -2019,13 +2019,28 @@ def patch_quota_page_latest(target: Path) -> None:
 
 
 def patch_quota_cards_latest(target: Path) -> None:
-    card_path = target / 'src/features/quota/components/QuotaCard.tsx'
-    insert_once(card_path, "import { resolveQuotaErrorMessage } from '@/utils/quota';\n", "import { resolveQuotaErrorMessage } from '@/utils/quota';\nimport { QuotaCachedTime } from '@/pro/modules/quota';\n", 'import { QuotaCachedTime }')
-    replace_once(card_path, "        ) : quota ? (\n          <adapter.Body quota={quota} classes={quotaClasses} />\n        ) : (", "        ) : quota ? (\n          <>\n            <adapter.Body quota={quota} classes={quotaClasses} />\n            <QuotaCachedTime quotaStatus={status} cachedAt={quota.cachedAt} />\n          </>\n        ) : (")
-
-    auth_path = target / 'src/features/authFiles/components/AuthFileQuotaSection.tsx'
-    insert_once(auth_path, "import { bindQuotaClasses } from '@/features/quota/types';\n", "import { bindQuotaClasses } from '@/features/quota/types';\nimport { QuotaCachedTime } from '@/pro/modules/quota';\n", 'import { QuotaCachedTime }')
-    replace_once(auth_path, "      ) : quota ? (\n        <adapter.Body quota={quota} classes={compactQuotaClasses} />\n      ) : (", "      ) : quota ? (\n        <>\n          <adapter.Body quota={quota} classes={compactQuotaClasses} />\n          <QuotaCachedTime quotaStatus={quotaStatus} cachedAt={'cachedAt' in quota ? quota.cachedAt : undefined} />\n        </>\n      ) : (")
+    renderers = (
+        ('src/features/quota/components/QuotaCard.tsx',
+         "import { resolveQuotaErrorMessage } from '@/utils/quota';\n",
+         'quotaClasses', 'status', 'quota.cachedAt', '          '),
+        ('src/features/authFiles/components/AuthFileQuotaSection.tsx',
+         "import { bindQuotaClasses } from '@/features/quota/types';\n",
+         'compactQuotaClasses', 'quotaStatus', "'cachedAt' in quota ? quota.cachedAt : undefined", '        '),
+    )
+    for relative_path, import_anchor, classes, status, cached_at, indent in renderers:
+        path = target / relative_path
+        insert_once(path, import_anchor, import_anchor + "import { QuotaCachedTime } from '@/pro/modules/quota';\n", 'import { QuotaCachedTime }')
+        body = f'<adapter.Body quota={{quota}} classes={{{classes}}} />'
+        timestamp = f'<QuotaCachedTime quotaStatus={{{status}}} cachedAt={{{cached_at}}} />'
+        fragment = f'{indent}<>\n{indent}  {body}\n{indent}  {timestamp}\n{indent}</>\n'
+        # Anchor the standalone body, preserving upstream loading/error guards.
+        replace_once(path, f'{indent}{body}\n', fragment)
+        if 'retainedClaudeUsage' in read(path):
+            replace_once(
+                path,
+                f'{{retainedClaudeUsage && quota && {body}}}',
+                '{retainedClaudeUsage && quota && (\n' + fragment + indent[:-2] + ')}',
+            )
 
 
 def patch_quota_success_timestamps(target: Path) -> None:
@@ -2173,6 +2188,16 @@ def patch_cooldown_hint_test(target: Path) -> None:
     )
 
 
+def patch_claude_usage_test_contract(target: Path) -> None:
+    # This fixture supplies an explicit status; include Pro's required metadata
+    # without weakening the upstream strict raw-response equality assertion.
+    replace_once(
+        target / 'tests/claudeOAuthUsage.test.ts',
+        'const result = (statusCode: number, body: unknown): ApiCallResult => ({\n  statusCode,\n',
+        'const result = (statusCode: number, body: unknown): ApiCallResult => ({\n  statusCode,\n  hasStatusCode: true,\n',
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 2:
         raise SystemExit('Usage: apply_customizations.py [target_dir]')
@@ -2196,6 +2221,7 @@ def main() -> None:
     patch_quota_store(target)
     patch_quota_constants(target)
     patch_api_call_executor_contract(target)
+    patch_claude_usage_test_contract(target)
     patch_codex_account_id_resolver(target)
     patch_quota_provider_model_latest(target)
     patch_quota_success_timestamps(target)

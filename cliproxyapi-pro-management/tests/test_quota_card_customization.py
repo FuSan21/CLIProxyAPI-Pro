@@ -58,6 +58,66 @@ class QuotaCardCustomizationTest(unittest.TestCase):
     def setUp(self) -> None:
         CUSTOMIZATIONS._writes.clear()
 
+    def test_preserves_both_retained_claude_render_branches_and_reapplication(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir)
+            cases = (
+                ('src/features/quota/components/QuotaCard.tsx', QUOTA_CARD_SOURCE, 'quotaClasses', 'status', 'quota.cachedAt'),
+                ('src/features/authFiles/components/AuthFileQuotaSection.tsx', AUTH_FILE_QUOTA_SECTION_SOURCE, 'compactQuotaClasses', 'quotaStatus', "'cachedAt' in quota ? quota.cachedAt : undefined"),
+            )
+            for relative_path, source, classes, _, _ in cases:
+                path = target / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                source = source.replace(') : quota ? (', ') : quota && !retainedClaudeUsage ? (')
+                source = source.replace(') : (', ') : !retainedClaudeUsage ? (')
+                indent = '        ' if classes == 'quotaClasses' else '      '
+                source = source.replace('    </div>', f'{indent}{{retainedClaudeUsage && quota && <adapter.Body quota={{quota}} classes={{{classes}}} />}}\n    </div>')
+                path.write_text(source)
+
+            CUSTOMIZATIONS.patch_quota_cards_latest(target)
+            CUSTOMIZATIONS.flush_writes()
+            first_application = {}
+            for relative_path, _, classes, status, cached_at in cases:
+                path = target / relative_path
+                source = path.read_text()
+                first_application[path] = source
+                self.assertEqual(source.count("import { QuotaCachedTime }"), 1)
+                self.assertEqual(source.count(f'<adapter.Body quota={{quota}} classes={{{classes}}} />'), 2)
+                self.assertEqual(source.count(f'<QuotaCachedTime quotaStatus={{{status}}} cachedAt={{{cached_at}}} />'), 2)
+                self.assertIn(') : quota && !retainedClaudeUsage ? (', source)
+                self.assertIn(') : !retainedClaudeUsage ? (', source)
+                self.assertIn('{retainedClaudeUsage && quota && (', source)
+
+            CUSTOMIZATIONS.patch_quota_cards_latest(target)
+            CUSTOMIZATIONS.flush_writes()
+            for path, source in first_application.items():
+                self.assertEqual(path.read_text(), source)
+
+    def test_rejects_missing_or_duplicate_body_without_flushing(self) -> None:
+        for broken_component in ('card', 'auth'):
+            for body_count in (0, 2):
+                with self.subTest(component=broken_component, body_count=body_count), tempfile.TemporaryDirectory() as temp_dir:
+                    CUSTOMIZATIONS._writes.clear()
+                    target = Path(temp_dir)
+                    cases = (
+                        ('card', 'src/features/quota/components/QuotaCard.tsx', QUOTA_CARD_SOURCE, 'quotaClasses'),
+                        ('auth', 'src/features/authFiles/components/AuthFileQuotaSection.tsx', AUTH_FILE_QUOTA_SECTION_SOURCE, 'compactQuotaClasses'),
+                    )
+                    originals = {}
+                    for component, relative_path, source, classes in cases:
+                        path = target / relative_path
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        if component == broken_component:
+                            body = f'<adapter.Body quota={{quota}} classes={{{classes}}} />'
+                            indent = '          ' if classes == 'quotaClasses' else '        '
+                            source = source.replace(body, ('\n' + indent).join([body] * body_count))
+                        path.write_text(source)
+                        originals[path] = source
+                    with self.assertRaisesRegex(RuntimeError, f'Expected one pattern.*found {body_count}'):
+                        CUSTOMIZATIONS.patch_quota_cards_latest(target)
+                    for path, source in originals.items():
+                        self.assertEqual(path.read_text(), source)
+
     def test_adds_cached_time_to_quota_renderers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir)
