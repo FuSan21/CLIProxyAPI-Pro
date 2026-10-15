@@ -2000,10 +2000,19 @@ replace_once(
 replace_once(
     management_handler_source,
     '''\th.mu.Lock()
+\tdefer h.mu.Unlock()
+\tif h.isStaleConfigFileSnapshotLocked(cloned) {
+\t\tlog.Debug("management: ignoring config reload parsed from an older config file version")
+\t\treturn
+\t}
 \th.cfg = cloned
-\th.mu.Unlock()
 ''',
     '''\th.mu.Lock()
+\tif h.isStaleConfigFileSnapshotLocked(cloned) {
+\t\tlog.Debug("management: ignoring config reload parsed from an older config file version")
+\t\th.mu.Unlock()
+\t\treturn
+\t}
 \th.updateAPIKeyConfigGenerationLocked()
 \th.cfg = cloned
 \th.updateAPIKeyConfigGenerationLocked()

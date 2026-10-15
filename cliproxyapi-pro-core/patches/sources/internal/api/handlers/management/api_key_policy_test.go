@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1130,5 +1131,62 @@ func TestWriteAPIKeyPolicyErrorMapsCostQuotaPricingFailures(t *testing.T) {
 				t.Fatalf("error code = %q, want %q", body.Error.Code, test.code)
 			}
 		})
+	}
+}
+
+// A late file reload must not undo newer management state or invalidate its references.
+func TestAPIKeyPolicyConfigReloadRejectsStaleFileSnapshot(t *testing.T) {
+	h, router := newAPIKeyPolicyManagementHarness(t, []string{"current-key"})
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	currentBytes := []byte("api-keys: [current-key]\n")
+	if err := os.WriteFile(path, currentBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.configFilePath = path
+	listed := bindingResponse(t, policyRequest(t, router, http.MethodGet, "/v0/management/api-key-policy-bindings", "session-a", nil))
+	first := listed.Items[0]
+	_, generation := h.apiKeyConfigSnapshot()
+	service := h.apiKeyPolicyService()
+	policyGeneration := service.ConfiguredGeneration()
+	stale := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"stale-key"}}}
+	stale.SourceHash = config.ComputeSourceHash([]byte("api-keys: [stale-key]\n"))
+	h.SetConfig(stale)
+	keys, after := h.apiKeyConfigSnapshot()
+	if after != generation || len(keys) != 1 || keys[0] != "current-key" || service.ConfiguredGeneration() != policyGeneration {
+		t.Fatalf("stale reload mutated current state: keys=%v generation=%d policyGeneration=%d", keys, after, service.ConfiguredGeneration())
+	}
+	target := policyRequest(t, router, http.MethodPost, "/v0/management/api-key-policy-usage-target", "session-a", map[string]any{"keyRef": first.KeyRef})
+	if target.Code != http.StatusOK {
+		t.Fatalf("stale reload invalidated reference: %d %s", target.Code, target.Body.String())
+	}
+	acceptedBytes := []byte("api-keys: [accepted-key]\n")
+	if err := os.WriteFile(path, acceptedBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	accepted := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"accepted-key"}}}
+	accepted.SourceHash = config.ComputeSourceHash(acceptedBytes)
+	h.SetConfig(accepted)
+	keys, after = h.apiKeyConfigSnapshot()
+	identity, err := apikeypolicy.NewAuthenticatedAPIKeyIdentity("accepted-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := service.ConfiguredHashes()
+	if after == generation || len(keys) != 1 || keys[0] != "accepted-key" || len(hashes) != 1 || hashes[0] != identity.Hash() {
+		t.Fatalf("matching reload not applied: keys=%v generation=%d hashes=%v", keys, after, hashes)
+	}
+	target = policyRequest(t, router, http.MethodPost, "/v0/management/api-key-policy-usage-target", "session-a", map[string]any{"keyRef": first.KeyRef})
+	if target.Code == http.StatusOK {
+		t.Fatal("accepted changed key set retained old reference")
+	}
+	h.SetConfig(&config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"hashless-key"}}})
+	keys, after = h.apiKeyConfigSnapshot()
+	if len(keys) != 1 || keys[0] != "hashless-key" {
+		t.Fatalf("hashless config rejected: %v", keys)
+	}
+	h.SetConfig(nil)
+	keys, cleared := h.apiKeyConfigSnapshot()
+	if len(keys) != 0 || cleared == after || len(service.ConfiguredHashes()) != 0 {
+		t.Fatal("nil reload did not clear config and policy keys")
 	}
 }
