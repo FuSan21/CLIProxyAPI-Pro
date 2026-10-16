@@ -77,6 +77,7 @@ sdk/api/handlers/openai/openai_responses_websocket_input.go	upstream-generic-fix
 sdk/api/handlers/stream_forwarder.go	upstream-generic-fix	stream-cancellation	upstream-canceled-eof-classification
 sdk/auth/codex_device.go	upstream-generic-fix	auth-identity	upstream-stable-codex-account-identity
 sdk/auth/filestore.go	upstream-generic-fix	auth-identity	upstream-provider-identity-preserving-reauth
+sdk/cliproxy/antigravity_models.go	generic-host-hook	account-policy	upstream-auth-model-filter-hook-and-generation-fence
 sdk/cliproxy/auth/conductor.go	generic-host-hook	account-policy	upstream-execution-auth-overlay-resolver
 sdk/cliproxy/auth/conductor_cooldown.go	generic-host-hook	scheduler-runtime-state	expose-auth-result-and-refresh-observers-while-moving-persistence-to-plugin
 sdk/cliproxy/auth/conductor_execution.go	generic-host-hook	usage-accounting	upstream-attempt-and-request-metadata-context

@@ -1551,6 +1551,80 @@ insert_before(
     'func (s *Service) applyOAuthPolicy',
 )
 
+# Native dynamic Antigravity catalogs bypass the common model pipeline.
+antigravity_models = ROOT / 'sdk/cliproxy/antigravity_models.go'
+replace_once(
+    antigravity_models,
+    'func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints antigravityModelCapabilityHints, cfg *config.Config) []*ModelInfo {',
+    '''func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints antigravityModelCapabilityHints, cfg *config.Config) []*ModelInfo {
+\treturn s.antigravityModelsForHintsWithPolicy(context.Background(), auth, hints, cfg)
+}
+
+func (s *Service) antigravityModelsForHintsWithPolicy(ctx context.Context, auth *coreauth.Auth, hints antigravityModelCapabilityHints, cfg *config.Config) []*ModelInfo {''',
+    'func (s *Service) antigravityModelsForHintsWithPolicy',
+)
+replace_once(
+    antigravity_models,
+    '\tmodels = applyExcludedModels(models, excluded)\n',
+    '''\tmodels = applyExcludedModels(models, excluded)
+\tif s.proApp != nil { models = s.proApp.FilterModels(ctx, cfg, auth, models, s.coreManager) }
+''',
+    'if s.proApp != nil { models = s.proApp.FilterModels(ctx, cfg, auth, models, s.coreManager) }',
+)
+replace_once(
+    antigravity_models,
+    '\treturn a != nil && b != nil && a.Provider == b.Provider && a.Prefix == b.Prefix &&\n',
+    '''\tif a != nil { a = a.Clone(); coreauth.RestoreAccountPolicyBase(a) }
+\tif b != nil { b = b.Clone(); coreauth.RestoreAccountPolicyBase(b) }
+\treturn a != nil && b != nil && a.Provider == b.Provider && a.Prefix == b.Prefix &&
+''',
+    'if a != nil { a = a.Clone(); coreauth.RestoreAccountPolicyBase(a) }',
+)
+replace_once(
+    antigravity_models,
+    '''\t\t// Keep the config snapshot stable through publication. Registry CAS must
+\t\t// remain strict: an epoch from another publisher may use newer auth settings.
+\t\ts.cfgMu.RLock()
+\t\tmodels := s.antigravityModelsForHintsWithConfig(auth, hints, s.cfg)
+''',
+    '''\t\t// Resolve policy without service/cache/publication locks: plan detection can
+\t\t// call the provider. Use the latest request generation, but retain admission
+\t\t// ownership and the strict registry epoch captured before the probe.
+\t\tcfg := s.currentConfig()
+\t\tpolicyAuth := auth.Clone()
+\t\tif s.coreManager != nil {
+\t\t\tcurrent, exists := s.coreManager.GetByID(auth.ID)
+\t\t\tif !exists || !antigravityAuthModelSettingsEqual(current, auth) { return }
+\t\t\tpolicyAuth = current.Clone()
+\t\t}
+\t\tcoreauth.RestoreAccountPolicyBase(policyAuth)
+\t\tvar commitPolicy func(func()) bool
+\t\tif s.proApp != nil && s.proApp.OAuthPolicy() != nil {
+\t\t\tcommitPolicy = s.proApp.OAuthPolicy().PublicationGuard(policyAuth.ID, policyAuth.Generation, policyAuth.RegistrationEpoch)
+\t\t}
+\t\tmodels := s.antigravityModelsForHintsWithPolicy(ctx, policyAuth, hints, cfg)
+\t\tif ctx.Err() != nil { return }
+\t\ts.authModelCommitMu.Lock()
+\t\tdefer s.authModelCommitMu.Unlock()
+\t\tif _, found := ctx.Value(authModelRegistrationContextKey{}).(authModelRegistrationToken); found && !s.currentAuthModelRegistrationLocked(ctx, auth) { return }
+\t\tif s.coreManager != nil {
+\t\t\tcurrent, exists := s.coreManager.GetByID(auth.ID)
+\t\t\tif !exists || current.Disabled || !antigravityAuthModelSettingsEqual(current, auth) || s.antigravityCapabilityKey(current) != expectedKey { return }
+\t\t}
+\t\ts.cfgMu.RLock()
+\t\tif s.cfg != cfg || (cfg != nil && cfg.Home.Enabled) { s.cfgMu.RUnlock(); return }
+''',
+    'commitPolicy = s.proApp.OAuthPolicy().PublicationGuard(policyAuth.ID, policyAuth.Generation, policyAuth.RegistrationEpoch)',
+)
+replace_once(
+    antigravity_models,
+    '\t\tappliedEpoch, updated = reg.ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models)\n',
+    '''\t\tpublish := func() { if ctx.Err() == nil { appliedEpoch, updated = reg.ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models) } }
+\t\tif commitPolicy != nil { commitPolicy(publish) } else { publish() }
+''',
+    'if commitPolicy != nil { commitPolicy(publish) } else { publish() }',
+)
+
 service_auth = ROOT / 'sdk/cliproxy/service_auth.go'
 replace_once(
     service_auth,
@@ -7339,7 +7413,205 @@ result_scheduler_upserts = {
 if result_scheduler_upserts != {'sdk/cliproxy/auth/conductor_cooldown.go': 1}:
     raise SystemExit(f'unexpected Manager result scheduler upserts: {result_scheduler_upserts}')
 
+# Watcher updates must not overwrite a management write committed after their snapshot.
+replace_once(
+    ROOT / 'sdk/cliproxy/auth/conductor_lifecycle.go',
+    '\tupdateModeReplace updateAuthMode = iota',
+    '''	updateModeReplace updateAuthMode = iota
+	updateModeSnapshot''',
+    '''	updateModeReplace updateAuthMode = iota
+	updateModeSnapshot''',
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/auth/conductor_lifecycle.go',
+    '// Update replaces an existing auth entry and notifies hooks.',
+    '''// UpdateFromSnapshot applies an observed watcher update only while its base
+// snapshot still owns the persisted inputs. A concurrent persisted update wins.
+func (m *Manager) UpdateFromSnapshot(ctx context.Context, base, updated *Auth) (*Auth, error) {
+ if base == nil || updated == nil || base.ID != updated.ID { return nil, nil }
+ return m.updateInternal(ctx, base, updated, updateModeSnapshot)
+}
+
+// Update replaces an existing auth entry and notifies hooks.''',
+    '''// UpdateFromSnapshot applies an observed watcher update only while its base
+// snapshot still owns the persisted inputs. A concurrent persisted update wins.
+func (m *Manager) UpdateFromSnapshot(ctx context.Context, base, updated *Auth) (*Auth, error) {
+ if base == nil || updated == nil || base.ID != updated.ID { return nil, nil }
+ return m.updateInternal(ctx, base, updated, updateModeSnapshot)
+}
+
+// Update replaces an existing auth entry and notifies hooks.''',
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/auth/conductor_lifecycle.go',
+    '''	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64)
+	}
+	if existing.RegistrationEpoch > m.authEpochs[auth.ID] {''',
+    ''' if mode == updateModeSnapshot && (base == nil || existing.RegistrationEpoch != base.RegistrationEpoch || !snapshotAuthInputsEqual(existing, base)) {
+  current := existing.Clone()
+  m.mu.Unlock()
+  return current, false, false, nil
+ }
+ if mode == updateModeSnapshot { mergeAuthSaveDelta(auth, base, existing, false) }
+	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64)
+	}
+	if existing.RegistrationEpoch > m.authEpochs[auth.ID] {''',
+    ''' if mode == updateModeSnapshot && (base == nil || existing.RegistrationEpoch != base.RegistrationEpoch || !snapshotAuthInputsEqual(existing, base)) {
+  current := existing.Clone()
+  m.mu.Unlock()
+  return current, false, false, nil
+ }
+ if mode == updateModeSnapshot { mergeAuthSaveDelta(auth, base, existing, false) }
+	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64)
+	}
+	if existing.RegistrationEpoch > m.authEpochs[auth.ID] {''',
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/service_auth.go',
+    '\t\t_, err = s.coreManager.Update(ctx, auth)',
+    '''  var committed *coreauth.Auth
+  committed, err = s.coreManager.UpdateFromSnapshot(ctx, existing, auth)
+  if err == nil { if committed == nil { return nil }; auth = committed }''',
+    '''  var committed *coreauth.Auth
+  committed, err = s.coreManager.UpdateFromSnapshot(ctx, existing, auth)
+  if err == nil { if committed == nil { return nil }; auth = committed }''',
+)
+
+
+insert_before(
+    ROOT / 'sdk/cliproxy/auth/conductor_lifecycle.go',
+    '// UpdateFromSnapshot applies',
+    '''// snapshotAuthInputsEqual excludes request counters, cooldowns and scheduler
+// generations: those must not cause a legitimate file observation to be lost.
+func snapshotAuthInputsEqual(a, b *Auth) bool {
+ return a.RegistrationEpoch == b.RegistrationEpoch && a.CredentialVersion == b.CredentialVersion &&
+ a.Provider == b.Provider && a.Prefix == b.Prefix && a.FileName == b.FileName && a.Label == b.Label &&
+ a.Disabled == b.Disabled && (a.Status == StatusDisabled) == (b.Status == StatusDisabled) &&
+ a.ProxyURL == b.ProxyURL && reflect.DeepEqual(a.Attributes, b.Attributes) && reflect.DeepEqual(a.Metadata, b.Metadata)
+}
+
+''',
+    'func snapshotAuthInputsEqual(',
+)
+add_go_import(ROOT / 'sdk/cliproxy/auth/conductor_lifecycle.go', '\t"math"\n', '\t"reflect"\n')
+
+replace_once(
+    ROOT / 'sdk/cliproxy/service_auth.go',
+    '''		auth.CreatedAt = existing.CreatedAt
+''',
+    '''  // A queued, unversioned file observation may predate a successful PATCH.
+  // Capture existing before reading disk: a write during synthesis then loses
+  // the snapshot CAS below instead of replaying an old credential.
+  if auth.Generation == 0 && auth.AuthSourceKind() == coreauth.AuthSourceFile {
+   if watcher := s.currentWatcher(); watcher != nil {
+    path := auth.Attributes[coreauth.AttributePath]
+    if path == "" { path = auth.Attributes[coreauth.AttributeSource] }
+    if path != "" {
+     snapshots, errSnapshot := watcher.SnapshotAuthFile(path)
+     if errSnapshot != nil { return existing }
+     var fresh *coreauth.Auth
+     for _, candidate := range snapshots { if candidate != nil && candidate.ID == auth.ID { fresh = candidate; break } }
+     if fresh == nil { return existing }
+     auth = fresh.Clone()
+    }
+   }
+  }
+		auth.CreatedAt = existing.CreatedAt
+''',
+    'Capture existing before reading disk:',
+)
+
+# Evaluate native and appended plugin catalogs together before aliasing.
+replace_once(
+    ROOT / 'sdk/cliproxy/service_executors.go',
+    '''	pluginModels := s.pluginModelsForProvider(providerKey)
+	if len(pluginModels) == 0 {''',
+    ''' return appendResolvedPluginModels(models, s.pluginModelsForProvider(providerKey))
+}
+
+func appendResolvedPluginModels(models, pluginModels []*ModelInfo) []*ModelInfo {
+	if len(pluginModels) == 0 {''',
+    ''' return appendResolvedPluginModels(models, s.pluginModelsForProvider(providerKey))
+}
+
+func appendResolvedPluginModels(models, pluginModels []*ModelInfo) []*ModelInfo {
+	if len(pluginModels) == 0 {''',
+)
+insert_before(
+    ROOT / 'sdk/cliproxy/service_models.go',
+    'func (s *Service) applyOAuthPolicy(',
+    '''// Filter both original catalogs in one evaluation so effective policy counts
+// include plugin contributions. Keep them separate until native aliasing is done.
+func (s *Service) filterOAuthCatalogs(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, provider string, native []*ModelInfo) ([]*ModelInfo, []*ModelInfo) {
+ plugins := s.pluginModelsForProvider(provider)
+ excluded := oauthExcludedModelsForConfig(cfg, provider, auth.AuthKind())
+ if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" { excluded = strings.Split(value, ",") }
+ plugins = applyExcludedModels(plugins, excluded)
+ filtered := appendResolvedPluginModels(native, plugins)
+ if s.proApp != nil { filtered = s.proApp.FilterModels(ctx, cfg, auth, filtered, s.coreManager) }
+ allowed := make(map[string]bool, len(filtered))
+ for _, model := range filtered { if model != nil { allowed[strings.TrimSpace(model.ID)] = true } }
+ var filteredNative, filteredPlugins []*ModelInfo
+ for _, model := range native { if model != nil && allowed[strings.TrimSpace(model.ID)] { filteredNative = append(filteredNative, model) } }
+ for _, model := range plugins { if model != nil && allowed[strings.TrimSpace(model.ID)] { filteredPlugins = append(filteredPlugins, model) } }
+ return filteredNative, filteredPlugins
+}
+
+''',
+    'func (s *Service) filterOAuthCatalogs(',
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/service_models.go',
+    '''	models = s.applyOAuthPolicy(ctx, cfg, a, models)
+	models = applyOAuthModelAliasForAuth''',
+    '''	models, policyPlugins := s.filterOAuthCatalogs(ctx, cfg, a, provider, models)
+	models = applyOAuthModelAliasForAuth''',
+    '''	models, policyPlugins := s.filterOAuthCatalogs(ctx, cfg, a, provider, models)
+	models = applyOAuthModelAliasForAuth''',
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/service_models.go',
+    '\tmodels = s.appendPluginModels(key, models)',
+    '\tmodels = appendResolvedPluginModels(models, policyPlugins)',
+    '\tmodels = appendResolvedPluginModels(models, policyPlugins)',
+)
+replace_all_exact(
+    ROOT / 'sdk/cliproxy/service_models.go',
+    'ms = s.appendPluginModels(providerKey, ms)',
+    'ms = s.applyOAuthPolicy(ctx, cfg, a, s.appendPluginModels(providerKey, ms))',
+    2,
+)
+replace_all_exact(
+    ROOT / 'sdk/cliproxy/service_models.go',
+    'ms = s.appendPluginModels(providerKey, nil)',
+    'ms = s.applyOAuthPolicy(ctx, cfg, a, s.appendPluginModels(providerKey, nil))',
+    2,
+)
+replace_all_exact(
+    ROOT / 'sdk/cliproxy/service_models.go',
+    'models = s.appendPluginModels(providerKey, nil)',
+    'models = s.applyOAuthPolicy(ctx, cfg, a, s.appendPluginModels(providerKey, nil))',
+    1,
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/antigravity_models.go',
+    '\tif s.proApp != nil { models = s.proApp.FilterModels(ctx, cfg, auth, models, s.coreManager) }',
+    '\tmodels, policyPlugins := s.filterOAuthCatalogs(ctx, cfg, auth, "antigravity", models)',
+    '\tmodels, policyPlugins := s.filterOAuthCatalogs(ctx, cfg, auth, "antigravity", models)',
+)
+replace_once(
+    ROOT / 'sdk/cliproxy/antigravity_models.go',
+    '\tmodels = s.appendPluginModels("antigravity", models)',
+    '\tmodels = appendResolvedPluginModels(models, policyPlugins)',
+    '\tmodels = appendResolvedPluginModels(models, policyPlugins)',
+)
+
 format_go_writes([
+    'sdk/cliproxy/auth/conductor_lifecycle.go',
+    'sdk/cliproxy/service_auth.go',
     'internal/cache/runtime_proxy_generation_pro.go',
     'internal/client/codex/live/realtime_usage_pro.go',
     'internal/runtime/executor/runtime_proxy_antigravity_pro.go',

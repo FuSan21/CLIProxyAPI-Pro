@@ -74,6 +74,7 @@ sdk/api/handlers/openai/openai_responses_websocket_input.go
 sdk/api/handlers/stream_forwarder.go
 sdk/auth/codex_device.go
 sdk/auth/filestore.go
+sdk/cliproxy/antigravity_models.go
 sdk/cliproxy/auth/conductor.go
 sdk/cliproxy/auth/conductor_cooldown.go
 sdk/cliproxy/auth/conductor_execution.go

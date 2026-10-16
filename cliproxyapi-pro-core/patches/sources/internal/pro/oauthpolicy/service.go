@@ -499,3 +499,23 @@ func (s *Service) EffectivePolicy(authID string) (modelengine.Result, bool) {
 	s.mu.RUnlock()
 	return policy, found
 }
+
+// PublicationGuard captures policy and evidence revisions before evaluation.
+// The callback must only publish prepared models; it must not call policy or auth
+// resolvers. Keeping this short critical section prevents a rule change between
+// a successful revision check and registry publication.
+func (s *Service) PublicationGuard(authID string, generation, registrationEpoch uint64) func(func()) bool {
+	s.mu.RLock()
+	revision, evidence := s.revision, s.planEvidenceRevision
+	s.mu.RUnlock()
+	return func(publish func()) bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		version, known := s.authVersions[authID]
+		if s.closed || !known || version.Generation != generation || version.RegistrationEpoch != registrationEpoch || s.revision != revision || s.planEvidenceRevision != evidence {
+			return false
+		}
+		publish()
+		return true
+	}
+}
